@@ -21,7 +21,7 @@ import Dhall.Import ( load )
 import DhallTraversal ( subExpr )
 import System.Environment ( getArgs )
 
-import qualified Dhall.Parser
+import qualified Data.HashMap.Strict.InsOrd as InsOrdMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text
@@ -30,7 +30,8 @@ import qualified Data.Text.Lazy.Builder as LazyBuilder
 import qualified Data.Text.Lazy.IO as LazyText
 import qualified Dhall
 import qualified Dhall.Core
-import qualified Dhall.Core as Expr ( Expr(..) )
+import qualified Dhall.Core as Expr ( Expr(..), Chunks(..) )
+import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
 import qualified Filesystem.Path.CurrentOS as Path
 
@@ -117,7 +118,7 @@ exprToDerivationTree =
                   `Expr.App` Expr.Var "eval-nix"
               )
             of
-            Expr.App ( Expr.Var "eval-nix" ) ( Expr.TextLit src ) -> do
+            Expr.App ( Expr.Var "eval-nix" ) ( Expr.TextLit ( Expr.Chunks [] src ) ) -> do
               return ( EvalNix ( LazyBuilder.toLazyText src ) )
 
             Expr.App ( Expr.Var "derive" ) ( Expr.RecordLit fields ) -> do
@@ -130,15 +131,15 @@ exprToDerivationTree =
                   , dtExec =
                       fromMaybe
                         ( error $ "exec missing " <> show fields' )
-                        ( Map.lookup "exec" fields' >>= Dhall.extract Dhall.auto )
+                        ( InsOrdMap.lookup "exec" fields' >>= Dhall.extract Dhall.auto )
                   , dtArgs =
                       fromMaybe
                         ( error "args missing" )
-                        ( Map.lookup "arguments" fields' >>= Dhall.extract Dhall.auto )
+                        ( InsOrdMap.lookup "arguments" fields' >>= Dhall.extract Dhall.auto )
                   , dtName =
                       fromMaybe
                         ( error "Name missing" )
-                        ( Map.lookup "name" fields' >>= Dhall.extract Dhall.auto )
+                        ( InsOrdMap.lookup "name" fields' >>= Dhall.extract Dhall.auto )
                   }
 
         modify (this : )

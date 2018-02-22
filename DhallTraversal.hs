@@ -44,6 +44,13 @@ subExpr f = \case
   NaturalTimes a b ->
     NaturalTimes <$> f a <*> f b
 
+  TextLit (Chunks a b) ->
+    TextLit
+      <$>
+        ( Chunks
+            <$> traverse ( \(a,b) -> (,) <$> pure a <*> f b ) a <*> pure b
+        )
+
   TextAppend a b ->
     TextAppend <$> f a <*> f b
 
@@ -76,6 +83,9 @@ subExpr f = \case
 
   Merge a b t ->
     Merge <$> f a <*> f b <*> traverse f t
+
+  Constructors a ->
+    Constructors <$> f a
 
   Field a b ->
     Field <$> f a <*> pure b
