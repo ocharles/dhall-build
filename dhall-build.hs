@@ -4,90 +4,47 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
-import qualified Nix.Daemon
-import qualified Nix.StorePath
-
-
-import Control.Monad.IO.Class
-import Control.Monad.Trans.Class
-import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
-import Crypto.Hash
-import Data.Bits
-import Data.Bits (xor)
-import qualified Data.ByteArray as Mem
-import qualified Data.ByteString.Lazy as BS
-import Data.Function ((&))
-import qualified Data.Map as Map
-import Data.Monoid ((<>))
-import qualified Data.Set as Set
-import Data.String (fromString)
-import Data.Text.Lazy (Text)
-import qualified Data.Text.Lazy as T
-import Data.Text.Lazy.Builder (fromLazyText)
-import qualified Data.Text.Lazy.Builder as LazyBuilder
-import Data.Text.Lazy.Encoding (encodeUtf8)
-import Data.Text.Lazy.IO (readFile)
-import qualified Data.Text.Lazy.IO as T
-import Data.Text.Prettyprint.Doc (Pretty)
-import Dhall.Context (empty, insert)
-import Dhall.Core
-  ( Expr(..)
-  , Normalizer
-  , Var(V)
-  , normalize
-  , normalizeWith
-  , pretty
-  , subst
-  )
-import Dhall.Import (load)
-import Dhall.Parser (exprFromText)
-import Dhall.TypeCheck (X, absurd, typeWith)
-import qualified Filesystem.Path.CurrentOS as Path
-import qualified Nix.Derivation as Nix
-import Prelude hiding (readFile)
+module Main ( main ) where
 
 import Control.Exception ( throwIO )
-import Control.Monad.Trans.State.Strict ( execState, runStateT, evalStateT )
-import Control.Monad.State.Class ( modify, get )
-
+import Control.Monad.IO.Class ( MonadIO, liftIO )
+import Control.Monad.State.Class ( MonadState, modify, get )
+import Control.Monad.Trans.State.Strict ( evalStateT, runStateT )
+import Crypto.Hash ( SHA256, hashlazy )
+import Data.Function ( (&) )
 import Data.Maybe ( fromMaybe )
+import Data.Monoid ( (<>) )
+import Data.String ( fromString )
+import Data.Text.Lazy ( Text )
+import Data.Text.Lazy.Encoding ( encodeUtf8 )
+import Dhall.Import ( load )
+import DhallTraversal ( subExpr )
+import System.Environment ( getArgs )
 
+import qualified Dhall.Parser
+import qualified Data.Attoparsec.Text.Lazy as Attoparsec
+import qualified Data.Map as Map
+import qualified Data.Set as Set
+import qualified Data.Text
 import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Builder as LazyBuilder
 import qualified Data.Text.Lazy.IO as LazyText
 import qualified Dhall
 import qualified Dhall.Core
-import qualified Dhall.Core as Dhall ( Expr )
 import qualified Dhall.Core as Expr ( Expr(..) )
-import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
-
-import qualified Network.Socket as N hiding ( recv )
-import qualified Network.Socket.ByteString.Lazy as N
-
-import qualified Data.Text.Lazy as L
-import qualified Data.Text.Lazy.Encoding as L
-import qualified Data.ByteString.Lazy.Builder as BS
-
-import Data.Int
-import qualified Data.Binary as Binary
-import qualified Data.Binary.Get as Binary
-import Debug.Trace
-
-import DhallTraversal
+import qualified Filesystem.Path.CurrentOS as Path
+import qualified Nix.Daemon
+import qualified Nix.Derivation as Nix
+import qualified Nix.StorePath
 import qualified System.Process as Process
-import qualified Data.Attoparsec.Text.Lazy as Attoparsec
-import qualified Data.Text
 
-import System.Environment  
 
-data Derive = Derive
-  { drvScript :: String
-  }
-
+main :: IO ()
 main = do
   (f : _) <-
     getArgs
-    
+
   t <-
     LazyText.readFile f
 
@@ -102,14 +59,14 @@ main = do
   expr <-
     Dhall.Import.load parsedExpr
 
-  exprType <-
+  _ <-
     case Dhall.TypeCheck.typeOf expr of
       Left e ->
         throwIO e
-        
+
       Right a ->
         return a
-  
+
   ( res, derivationTrees ) <-
     exprToDerivationTree ( Dhall.Core.normalize expr )
 
@@ -128,21 +85,25 @@ data DerivationTree = DerivationTree
 
 
 
-exprToDerivationTree e =
-  runStateT
-    ( go
-        ( Dhall.Core.normalize
-            ( e
-                `Expr.App` Expr.Var "output"
-            )
-        )
-    )
-    []
+exprToDerivationTree
+  :: Expr.Expr s Dhall.TypeCheck.X
+  -> IO ( Expr.Expr Dhall.Parser.Src Dhall.TypeCheck.X , [ DerivationTree ] )
+exprToDerivationTree =
+  \e ->
+    runStateT
+      ( go
+          ( Dhall.Core.normalize
+              ( e
+                  `Expr.App` Expr.Var "output"
+              )
+          )
+      )
+      []
 
   where
 
     go = \case
-      e@( Expr.App "output" d ) -> do
+      Expr.App "output" d -> do
         this <-
           case
             Dhall.Core.normalize
@@ -160,7 +121,7 @@ exprToDerivationTree e =
                 liftIO ( runStateT ( traverse go fields ) [] )
 
               return
-                DerivationTree 
+                DerivationTree
                   { dtInputs = inputs
                   , dtExec =
                       fromMaybe
@@ -191,9 +152,12 @@ exprToDerivationTree e =
           )
 
       e ->
-        normalize <$> subExpr go e
+        Dhall.Core.normalize <$> subExpr go e
 
 
+addDerivationTree
+  :: ( MonadIO m, MonadState ( Map.Map Nix.Derivation String ) m )
+  => Nix.Daemon.NixDaemon -> DerivationTree -> m ()
 addDerivationTree daemon t@DerivationTree{} = do
   mapM_ ( addDerivationTree daemon ) ( dtInputs t )
 
@@ -213,21 +177,29 @@ addDerivationTree daemon t@DerivationTree{} = do
 addDerivationTree _ (EvalNix src) = do
   liftIO $ putStrLn $ "Evaluate " ++ show src
 
-loadDerivation drvPath = do 
+
+loadDerivation :: FilePath -> IO Nix.Derivation
+loadDerivation drvPath = do
   drvText <-
     LazyText.readFile drvPath
 
-  let Attoparsec.Done _ result = Attoparsec.parse Nix.parseDerivation drvText
+  let
+    Attoparsec.Done _ result =
+      Attoparsec.parse Nix.parseDerivation drvText
 
   return result
 
+
+hashDerivationModulo
+  :: ( MonadIO m, MonadState ( Map.Map Nix.Derivation String) m)
+  => Nix.Derivation -> m String
 hashDerivationModulo derivation = do
   hashCache <- get
 
   case Map.lookup derivation hashCache of
     Just cached ->
       return cached
-      
+
     Nothing ->  do
       hash <-
         case Map.toList ( Nix.outputs derivation ) of
@@ -236,7 +208,7 @@ hashDerivationModulo derivation = do
             "fixed:out:" <> hashAlgo <> ":" <> hash <> ":" <> fromString (Path.encodeString path)
 
           _ -> do
-            maskedInputs <- 
+            maskedInputs <-
               fmap Map.fromList
                 ( mapM
                     ( \ (path, outs) -> do
@@ -245,8 +217,8 @@ hashDerivationModulo derivation = do
                         return ( fromString hash, outs )
                     )
                     ( Map.toList ( Nix.inputDrvs derivation ) )
-                ) 
-            
+                )
+
             return $
               show . hashlazy @SHA256 . encodeUtf8 . LazyBuilder.toLazyText $
               Nix.buildDerivation derivation { Nix.inputDrvs = maskedInputs }
@@ -255,68 +227,73 @@ hashDerivationModulo derivation = do
 
       return hash
 
+
+evalNix :: Text -> IO FilePath
 evalNix src =
-  init <$> Process.readCreateProcess ( Process.proc "nix-instantiate" [ "-E", LazyText.unpack src ] ) ""
-  
+  init
+    <$>
+      Process.readCreateProcess
+        ( Process.proc "nix-instantiate" [ "-E", LazyText.unpack src ] )
+        ""
 
-derivationTreeToDerivation (EvalNix src) = do
-  drvPath <-
-    liftIO ( evalNix src )
 
-  liftIO ( loadDerivation drvPath )
+derivationTreeToDerivation
+  :: ( MonadState ( Map.Map Nix.Derivation String ) m, MonadIO m )
+  => DerivationTree -> m Nix.Derivation
+derivationTreeToDerivation = \case
+  EvalNix src -> do
+    drvPath <-
+      liftIO ( evalNix src )
 
-derivationTreeToDerivation t@DerivationTree{} = do
-  maskedInputs <- 
-    fmap Map.fromList
-      ( mapM
-          ( \t -> do
+    liftIO ( loadDerivation drvPath )
+
+  t@DerivationTree{} -> do
+    maskedInputs <-
+      fmap Map.fromList
+        ( mapM
+            ( \t -> do
+                d <- derivationTreeToDerivation t
+                hash <- hashDerivationModulo d
+                return ( fromString hash, Set.singleton "out" )
+            )
+            ( dtInputs t )
+        )
+    actualInputs <-
+      fmap Map.fromList
+        (mapM
+          (\t -> do
               d <- derivationTreeToDerivation t
-              hash <- hashDerivationModulo d
-              return ( fromString hash, Set.singleton "out" )
-          )
-          ( dtInputs t )
-      ) 
-  actualInputs <-
-    fmap Map.fromList
-      (mapM
-        (\t -> do
-            d <- derivationTreeToDerivation t
-            path <- case t of
-              EvalNix src ->
-                liftIO ( fromString <$> evalNix src  )
+              path <- case t of
+                EvalNix src ->
+                  liftIO ( fromString <$> evalNix src  )
 
-              DerivationTree{} -> return $
-                fromString $ Nix.StorePath.textPath
-                (dtName t <> ".drv")
-                (LazyBuilder.toLazyText (Nix.buildDerivation d))
-            return
-              ( path
-              , Set.singleton "out"))
-        (dtInputs t))
+                DerivationTree{} -> return $
+                  fromString $ Nix.StorePath.textPath
+                  (dtName t <> ".drv")
+                  (LazyBuilder.toLazyText (Nix.buildDerivation d))
+              return
+                ( path
+                , Set.singleton "out"))
+          (dtInputs t))
 
-  let
-    drv =
-      Nix.Derivation
-        { Nix.outputs =
-            Map.singleton
-              "out"
-              (Nix.DerivationOutput
-                 (fromString (Nix.StorePath.derivationOutputPath (dtName t) drv
-                             { Nix.inputDrvs = maskedInputs }))
-                 ""
-                 "")
-        , Nix.inputDrvs = actualInputs 
-        , Nix.inputSrcs = mempty
-        , Nix.platform = "x86_64-linux"
-        , Nix.builder = dtExec t
-        , Nix.args = dtArgs t
-        , Nix.env =
-            fmap (fromString . Path.encodeString . Nix.path) (Nix.outputs drv)
-        }
+    let
+      drv =
+        Nix.Derivation
+          { Nix.outputs =
+              Map.singleton
+                "out"
+                (Nix.DerivationOutput
+                   (fromString (Nix.StorePath.derivationOutputPath (dtName t) drv
+                               { Nix.inputDrvs = maskedInputs }))
+                   ""
+                   "")
+          , Nix.inputDrvs = actualInputs
+          , Nix.inputSrcs = mempty
+          , Nix.platform = "x86_64-linux"
+          , Nix.builder = dtExec t
+          , Nix.args = dtArgs t
+          , Nix.env =
+              fmap (fromString . Path.encodeString . Nix.path) (Nix.outputs drv)
+          }
 
-  return drv
-
-
-
-
-context = empty & insert "derive" (Pi "_" Text (Pi "_" Text Text))
+    return drv
