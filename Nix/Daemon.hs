@@ -68,9 +68,11 @@ addTextToStore ( NixDaemon s ) name text references = do
 
   writeTexts s references
 
-  _ <- readNum s
+  _ <-
+    readNum s
 
-  _ <- readNum s
+  _ <-
+    readNum s
 
   readText s
 
