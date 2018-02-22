@@ -34,11 +34,11 @@ import qualified Dhall.Core
 import qualified Dhall.Core as Expr ( Expr(..) )
 import qualified Dhall.TypeCheck
 import qualified Filesystem.Path.CurrentOS as Path
+
 import qualified Nix.Daemon
 import qualified Nix.Derivation as Nix
+import qualified Nix.Instantiate
 import qualified Nix.StorePath
-import qualified System.Process as Process
-
 
 main :: IO ()
 main = do
@@ -228,22 +228,13 @@ hashDerivationModulo derivation = do
       return hash
 
 
-evalNix :: Text -> IO FilePath
-evalNix src =
-  init
-    <$>
-      Process.readCreateProcess
-        ( Process.proc "nix-instantiate" [ "-E", LazyText.unpack src ] )
-        ""
-
-
 derivationTreeToDerivation
   :: ( MonadState ( Map.Map Nix.Derivation String ) m, MonadIO m )
   => DerivationTree -> m Nix.Derivation
 derivationTreeToDerivation = \case
   EvalNix src -> do
     drvPath <-
-      liftIO ( evalNix src )
+      liftIO ( Nix.Instantiate.instantiateExpr src )
 
     liftIO ( loadDerivation drvPath )
 
@@ -265,7 +256,7 @@ derivationTreeToDerivation = \case
               d <- derivationTreeToDerivation t
               path <- case t of
                 EvalNix src ->
-                  liftIO ( fromString <$> evalNix src  )
+                  liftIO ( fromString <$> Nix.Instantiate.instantiateExpr src  )
 
                 DerivationTree{} -> return $
                   fromString $ Nix.StorePath.textPath
