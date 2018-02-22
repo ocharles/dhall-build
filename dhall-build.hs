@@ -4,6 +4,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
+import qualified Nix.Daemon as NixDaemon
+
+
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
@@ -109,7 +112,8 @@ main = do
   ( res, derivationTrees ) <-
     exprToDerivationTree ( Dhall.Core.normalize expr )
 
-  evalStateT ( mapM_ addDerivationTree derivationTrees ) mempty
+  NixDaemon.withDaemon $ \nixDaemon ->
+    evalStateT ( mapM_ ( addDerivationTree nixDaemon ) derivationTrees ) mempty
 
   LazyText.putStrLn ( Dhall.Core.pretty ( Dhall.Core.normalize res ) )
 
@@ -189,8 +193,8 @@ exprToDerivationTree e =
         normalize <$> subExpr go e
 
 
-addDerivationTree t@DerivationTree{} = do
-  mapM_ addDerivationTree ( dtInputs t )
+addDerivationTree daemon t@DerivationTree{} = do
+  mapM_ ( addDerivationTree daemon ) ( dtInputs t )
 
   drv <-
      derivationTreeToDerivation t
@@ -201,11 +205,11 @@ addDerivationTree t@DerivationTree{} = do
     LazyText.putStrLn src
 
     added <-
-      addTextToStore ( dtName t <> ".drv" ) src []
+      NixDaemon.addTextToStore daemon ( dtName t <> ".drv" ) src []
 
     putStrLn $ "Added " <> LazyText.unpack added
 
-addDerivationTree (EvalNix src) = do
+addDerivationTree _ (EvalNix src) = do
   liftIO $ putStrLn $ "Evaluate " ++ show src
 
 loadDerivation drvPath = do 
@@ -311,53 +315,6 @@ derivationTreeToDerivation t@DerivationTree{} = do
 
   return drv
 
-addTextToStore name text references = do
-  s <- N.socket N.AF_UNIX N.Stream 0
-  N.connect s (N.SockAddrUnix "/nix/var/nix/daemon-socket/socket")
-
-  writeInt s 1852405859
-
-  _WORKER_MAGIC_2 <- N.recv s 8
-  _PROTOCOL_VERSION <- N.recv s 8
-
-  writeInt s 0 -- Padding?
-
-  writeInt s 8 -- wopAddTextToStore
-
-  writeText s name
-  writeText s text
-  writeTexts s references
-
-  readNum s
-  readNum s
-  readText s
-
-writeInt s n =
-  N.sendAll s ( BS.toLazyByteString ( BS.int64LE n ) ) -- wopAddTextToStore 
-
-writeText s text = do
-  N.sendAll s ( BS.toLazyByteString ( BS.int64LE ( L.length text ) ) )
-  N.sendAll s ( L.encodeUtf8 text )
-  case L.length text `mod` 8 of
-    n | n > 0 ->
-        N.sendAll s ( BS.replicate ( 8 - n ) 0 )
-    _ -> return ()
-
-writeTexts s texts = do
-  writeInt s ( fromIntegral ( length texts ) )
-  mapM_ (writeText s) texts
-
-readNum s = do
-  Binary.runGet Binary.getInt64le <$> N.recv s 8
-
-readText s = do
-  len <- readNum s
-  t <- L.decodeUtf8 <$> N.recv s ( fromIntegral len )
-  case len `mod` 8 of
-    n | n > 0 ->
-        N.recv s ( 8 - n ) >> return ()
-    _ -> return ()
-  return t
   
 
 -- 
