@@ -4,7 +4,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
-import qualified Nix.Daemon as NixDaemon
+import qualified Nix.Daemon
+import qualified Nix.StorePath
 
 
 import Control.Monad.IO.Class
@@ -112,7 +113,7 @@ main = do
   ( res, derivationTrees ) <-
     exprToDerivationTree ( Dhall.Core.normalize expr )
 
-  NixDaemon.withDaemon $ \nixDaemon ->
+  Nix.Daemon.withDaemon $ \nixDaemon ->
     evalStateT ( mapM_ ( addDerivationTree nixDaemon ) derivationTrees ) mempty
 
   LazyText.putStrLn ( Dhall.Core.pretty ( Dhall.Core.normalize res ) )
@@ -205,7 +206,7 @@ addDerivationTree daemon t@DerivationTree{} = do
     LazyText.putStrLn src
 
     added <-
-      NixDaemon.addTextToStore daemon ( dtName t <> ".drv" ) src []
+      Nix.Daemon.addTextToStore daemon ( dtName t <> ".drv" ) src []
 
     putStrLn $ "Added " <> LazyText.unpack added
 
@@ -285,7 +286,7 @@ derivationTreeToDerivation t@DerivationTree{} = do
                 liftIO ( fromString <$> evalNix src  )
 
               DerivationTree{} -> return $
-                fromString $ makeTextPath
+                fromString $ Nix.StorePath.textPath
                 (dtName t <> ".drv")
                 (LazyBuilder.toLazyText (Nix.buildDerivation d))
             return
@@ -300,7 +301,7 @@ derivationTreeToDerivation t@DerivationTree{} = do
             Map.singleton
               "out"
               (Nix.DerivationOutput
-                 (fromString (derivationOutput (dtName t) drv
+                 (fromString (Nix.StorePath.derivationOutputPath (dtName t) drv
                              { Nix.inputDrvs = maskedInputs }))
                  ""
                  "")
@@ -315,109 +316,7 @@ derivationTreeToDerivation t@DerivationTree{} = do
 
   return drv
 
-  
 
--- 
--- 
--- instantiate :: Expr s Op -> WriterT [DerivationTree] IO (Expr X X)
--- instantiate e =
---   case normalize e of
---     App (App (Embed OpDerive) name) script -> do
---       (script', inputs) <- lift (runWriterT (instantiate script))
---       let tree =
---             DerivationTree
---             { dtInputs = inputs
---             , dtScript =
---                 case normalize script' of
---                   TextLit builder -> LazyBuilder.toLazyText builder
---             , dtName =
---                 case normalize name of
---                   TextLit builder -> LazyBuilder.toLazyText builder
---             }
---       liftIO $ putStrLn "dtScript:"
---       liftIO (print (dtScript tree))
---       tell [tree]
---       return
---         (TextLit
---            (fromString . show . Nix.path $
---             (Nix.outputs (derivationTreeDerivation tree) Map.! "out")))
---     TextLit t -> return (TextLit t)
---     TextAppend l r -> do
---       l <- instantiate l
---       r <- instantiate r
---       return (TextAppend l r)
 
--- bsChunks :: Int -> ByteString -> [ByteString]
-bsChunks n bytes =
-  if BS.length bytes > n
-    then BS.take n bytes : bsChunks n (BS.drop n bytes)
-    else [bytes]
-
--- compressHash :: ByteString -> ByteString
-compressHash hash =
-  foldl
-    (\hash' chunk -> BS.pack (BS.zipWith xor hash' chunk))
-    (BS.replicate 20 0)
-    (map (\c -> BS.append c (BS.take (20 - BS.length c) (BS.replicate 20 0))) $
-     bsChunks 20 hash)
 
 context = empty & insert "derive" (Pi "_" Text (Pi "_" Text Text))
-
-base32 bytes =
-  map
-    (\n ->
-       let b = n * 5
-       in let i = b `div` 8
-          in let j = b `mod` 8
-             in let c =
-                      ((BS.head (BS.drop (fromIntegral i) bytes)) `shiftR` j) .|.
-                      (if fromIntegral i >= BS.length bytes - 1
-                         then 0
-                         else (BS.head (BS.drop (fromIntegral (i + 1)) bytes) `shiftL`
-                               (8 - j)))
-                in alphabet !! fromIntegral (c .&. 0x1f))
-    (reverse [0 .. 32 - 1 :: Int])
-  where
-    alphabet = "0123456789abcdfghijklmnpqrsvwxyz"
-
-derivationOutput derivationName derivation =
-  derivation & clearOutputs & hashDerivation & encodeUtf8 .
-  formatOutputDescription &
-  makeOutputHash
-  where
-    hashDerivation =
-      T.pack . show . hashlazy @SHA256 . encodeUtf8 . LazyBuilder.toLazyText .
-      Nix.buildDerivation
-    clearOutputs drv =
-      drv
-      { Nix.outputs = Nix.DerivationOutput "" "" "" <$ Nix.outputs drv
-      , Nix.env = Map.union ("" <$ Nix.outputs drv) (Nix.env drv)
-      }
-    formatOutputDescription derivationHash =
-      "output:out:sha256:" <> derivationHash <> ":" <> nixStorePath <> ":" <>
-      derivationName
-    humanName = derivationName
-    makeOutputHash str =
-      let hashPart =
-            str & hashlazy @SHA256 & compressHash . BS.pack . Mem.unpack &
-            base32
-      in T.unpack nixStorePath <> "/" <> hashPart <> "-" <> T.unpack humanName
-    nixStorePath = "/nix/store"
-
-makeTextPath derivationName text =
-  text & hashText & encodeUtf8 . formatOutputDescription & makeOutputHash
-  where
-    hashText = T.pack . show . hashlazy @SHA256 . encodeUtf8
-    formatOutputDescription textHash =
-      "text:sha256" <> ":" <> textHash <> ":" <> nixStorePath <> ":" <> derivationName
-    humanName = derivationName
-    makeOutputHash str =
-      let hashPart =
-            str
-              & hashlazy @SHA256
-              & compressHash . BS.pack . Mem.unpack
-              & base32
-      in T.unpack nixStorePath <> "/" <> hashPart <> "-" <> T.unpack humanName
-    nixStorePath = "/nix/store"
-
-
