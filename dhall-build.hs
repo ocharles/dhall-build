@@ -86,7 +86,7 @@ main = do
     exprToDerivationTree ( Dhall.Core.normalize expr )
 
   Nix.Daemon.withDaemon $ \nixDaemon ->
-    evalStateT ( mapM_ ( addDerivationTree nixDaemon ) derivationTrees ) mempty
+    mapM_ ( addDerivationTree nixDaemon ) derivationTrees
 
   LazyText.putStrLn ( Dhall.Core.pretty ( Dhall.Core.normalize res ) )
 
@@ -157,7 +157,7 @@ exprToDerivationTree =
 
         modify (this : )
 
-        d <- liftIO $ evalStateT (derivationTreeToDerivation this) mempty
+        d <- derivationTreeToDerivation this
 
         return
           ( Nix.Derivation.outputs d
@@ -174,7 +174,7 @@ exprToDerivationTree =
 
 
 addDerivationTree
-  :: ( MonadIO m, MonadState ( Map.Map Nix.Derivation.Derivation String ) m )
+  :: ( MonadIO m )
   => Nix.Daemon.NixDaemon -> DerivationTree -> m ()
 addDerivationTree daemon t@DerivationTree{} = do
   mapM_ ( addDerivationTree daemon ) ( dtInputs t )
@@ -236,7 +236,7 @@ hashDerivationModulo =
 
 
 derivationTreeToDerivation
-  :: ( MonadState ( Map.Map Nix.Derivation.Derivation String ) m, MonadIO m )
+  :: ( MonadIO m )
   => DerivationTree -> m Nix.Derivation.Derivation
 derivationTreeToDerivation = \case
   EvalNix src -> do
