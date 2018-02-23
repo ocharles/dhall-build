@@ -6,6 +6,7 @@
 
 module Main ( main ) where
 
+import Control.Applicative ( (<**>) )
 import Control.Exception ( throwIO )
 import Control.Monad.IO.Class ( MonadIO, liftIO )
 import Control.Monad.State.Class ( MonadState, modify, get )
@@ -34,7 +35,9 @@ import qualified Dhall.Core as Expr ( Expr(..), Chunks(..) )
 import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
 import qualified Filesystem.Path.CurrentOS as Path
+import qualified Options.Applicative as OptParse
 
+import qualified MemoIO
 import qualified Nix.Daemon
 import qualified Nix.Derivation
 import qualified Nix.Derivations as Nix.Derivations
@@ -42,10 +45,20 @@ import qualified Nix.Instantiate
 import qualified Nix.StorePath
 
 
+commandLineParser :: OptParse.ParserInfo FilePath
+commandLineParser =
+  OptParse.info ( parser <**> OptParse.helper ) mempty
+
+  where
+
+  parser =
+    OptParse.strArgument ( OptParse.metavar "FILE" )
+
+
 main :: IO ()
 main = do
-  (f : _) <-
-    getArgs
+  f <-
+    OptParse.execParser commandLineParser
 
   t <-
     LazyText.readFile f
@@ -172,53 +185,54 @@ addDerivationTree daemon t@DerivationTree{} = do
   let src = LazyBuilder.toLazyText ( Nix.Derivation.buildDerivation drv )
 
   liftIO $ do
-    LazyText.putStrLn src
-
     added <-
       Nix.Daemon.addTextToStore daemon ( dtName t <> ".drv" ) src []
 
     putStrLn $ "Added " <> LazyText.unpack added
 
-addDerivationTree _ (EvalNix src) = do
-  liftIO $ putStrLn $ "Evaluate " ++ show src
+addDerivationTree _ (EvalNix src) =
+  return ()
+
+
+hashDerivationFileModulo =
+  go
+
+  where
+
+  go =
+    MemoIO.memoIO $ \path -> do
+      d <- liftIO ( Nix.Derivations.loadDerivation path )
+      hashDerivationModulo d
 
 
 hashDerivationModulo
-  :: ( MonadIO m, MonadState ( Map.Map Nix.Derivation.Derivation String) m)
+  :: ( MonadIO m )
   => Nix.Derivation.Derivation -> m String
-hashDerivationModulo derivation = do
-  hashCache <- get
+hashDerivationModulo =
+  go
 
-  case Map.lookup derivation hashCache of
-    Just cached ->
-      return cached
+  where
 
-    Nothing ->  do
-      hash <-
-        case Map.toList ( Nix.Derivation.outputs derivation ) of
-          [ ( "out", Nix.Derivation.DerivationOutput path hashAlgo hash ) ] | not ( Data.Text.null hash ) ->
-            return . show . hashlazy @SHA256 . encodeUtf8 . LazyText.fromStrict $
-            "fixed:out:" <> hashAlgo <> ":" <> hash <> ":" <> fromString (Path.encodeString path)
+  go derivation = do
+    case Map.toList ( Nix.Derivation.outputs derivation ) of
+      [ ( "out", Nix.Derivation.DerivationOutput path hashAlgo hash ) ] | not ( Data.Text.null hash ) ->
+        return . show . hashlazy @SHA256 . encodeUtf8 . LazyText.fromStrict $
+        "fixed:out:" <> hashAlgo <> ":" <> hash <> ":" <> fromString (Path.encodeString path)
 
-          _ -> do
-            maskedInputs <-
-              fmap Map.fromList
-                ( mapM
-                    ( \ (path, outs) -> do
-                        d <- liftIO ( Nix.Derivations.loadDerivation ( Path.encodeString path) )
-                        hash <- hashDerivationModulo d
-                        return ( fromString hash, outs )
-                    )
-                    ( Map.toList ( Nix.Derivation.inputDrvs derivation ) )
+      _ -> do
+        maskedInputs <-
+          fmap Map.fromList
+            ( mapM
+                ( \ (path, outs) -> do
+                    hash <- liftIO ( hashDerivationFileModulo ( Path.encodeString path ) )
+                    return ( fromString hash, outs )
                 )
+                ( Map.toList ( Nix.Derivation.inputDrvs derivation ) )
+            )
 
-            return $
-              show . hashlazy @SHA256 . encodeUtf8 . LazyBuilder.toLazyText $
-              Nix.Derivation.buildDerivation derivation { Nix.Derivation.inputDrvs = maskedInputs }
-
-      modify ( Map.insert derivation hash )
-
-      return hash
+        return $
+          show . hashlazy @SHA256 . encodeUtf8 . LazyBuilder.toLazyText $
+          Nix.Derivation.buildDerivation derivation { Nix.Derivation.inputDrvs = maskedInputs }
 
 
 derivationTreeToDerivation

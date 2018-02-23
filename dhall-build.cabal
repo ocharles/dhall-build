@@ -20,6 +20,7 @@ executable dhall-build
   main-is:             dhall-build.hs
   other-modules:
     DhallTraversal
+    MemoIO
     Nix.Daemon
     Nix.Derivations
     Nix.Instantiate
@@ -41,5 +42,7 @@ executable dhall-build
                      , transformers
                      , system-filepath
                      , insert-ordered-containers >= 0.2.1.0 && < 0.3
+                     , optparse-applicative
+                     , MemoTrie
   -- hs-source-dirs:
   default-language:    Haskell2010
