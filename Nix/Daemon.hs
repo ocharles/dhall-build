@@ -54,6 +54,9 @@ withDaemon m =
 
       writeInt s 0 -- Padding?
 
+      _ <-
+        readNum s
+
       return s
 
 
@@ -67,9 +70,6 @@ addTextToStore ( NixDaemon s ) name text references = do
   writeText s text
 
   writeTexts s references
-
-  _ <-
-    readNum s
 
   _ <-
     readNum s
