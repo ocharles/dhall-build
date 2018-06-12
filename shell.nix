@@ -13,4 +13,4 @@
         )
         {};
   };
-}).callCabal2nix "dhall-to-cabal" ./. {}).env
+}).callCabal2nix "dhall-build" ./. {}).env
