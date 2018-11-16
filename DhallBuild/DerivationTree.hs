@@ -1,13 +1,15 @@
+{-# language FlexibleContexts #-}
 {-# language LambdaCase #-}
 {-# language OverloadedStrings #-}
 {-# language TypeApplications #-}
 
 module DhallBuild.DerivationTree
   ( DerivationTree(..)
-  , exprToDerivationTree
+  , dhallBuildNormalizer
   , addDerivationTree
   ) where
 
+import Data.String ( fromString )
 import Control.Monad.IO.Class ( MonadIO, liftIO )
 import Control.Monad.State.Class ( modify )
 import Control.Monad.Trans.State.Strict ( runStateT )
@@ -18,9 +20,9 @@ import Data.Monoid ( (<>) )
 import Data.String ( fromString )
 import Data.Text.Lazy ( Text )
 import Data.Text.Lazy.Encoding ( encodeUtf8 )
-import DhallTraversal ( subExpr )
+import Control.Monad.Trans.State.Strict ( StateT )
 
-import qualified Data.HashMap.Strict.InsOrd as InsOrdMap
+import qualified Dhall.Map as InsOrdMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text
@@ -53,68 +55,54 @@ data DerivationTree
   deriving (Show)
 
 
-exprToDerivationTree
+dhallBuildNormalizer
   :: Expr.Expr s Dhall.TypeCheck.X
-  -> IO ( Expr.Expr Dhall.Parser.Src Dhall.TypeCheck.X , [ DerivationTree ] )
-exprToDerivationTree =
-  \e ->
-    runStateT
-      ( go ( Dhall.Core.normalize ( e `Expr.App` Expr.Var "output" ) ) )
-      []
+  -> StateT [ DerivationTree ] IO ( Maybe ( Expr.Expr s Dhall.TypeCheck.X ) )
+dhallBuildNormalizer =
+  \case
+    Expr.App ( Expr.Var "derivation" ) args ->
+      Just <$> derivation args
 
-  where
+    _ ->
+      return Nothing
 
-    go = \case
-      Expr.App "output" d -> do
-        this <-
-          case
-            Dhall.Core.normalize
-              ( d
-                  `Expr.App` Expr.Var "Derivation"
-                  `Expr.App` Expr.Var "derive"
-                  `Expr.App` Expr.Var "eval-nix"
-              )
-            of
-            Expr.App ( Expr.Var "eval-nix" ) ( Expr.TextLit ( Expr.Chunks [] src ) ) -> do
-              return ( EvalNix ( LazyBuilder.toLazyText src ) )
 
-            Expr.App ( Expr.Var "derive" ) ( Expr.RecordLit fields ) -> do
-              ( fields', inputs ) <-
-                liftIO ( runStateT ( traverse go fields ) [] )
+derivation :: Expr.Expr s Dhall.TypeCheck.X -> StateT [ DerivationTree ] IO ( Expr.Expr s Dhall.TypeCheck.X )
+derivation args = do
+  ( Expr.RecordLit fields', inputs ) <-
+    liftIO ( runStateT ( Dhall.Core.normalizeWithM dhallBuildNormalizer args ) [] )
 
-              return
-                DerivationTree
-                  { dtInputs = inputs
-                  , dtExec =
-                      fromMaybe
-                        ( error $ "exec missing " <> show fields' )
-                        ( InsOrdMap.lookup "exec" fields' >>= Dhall.extract Dhall.auto )
-                  , dtArgs =
-                      fromMaybe
-                        ( error "args missing" )
-                        ( InsOrdMap.lookup "arguments" fields' >>= Dhall.extract Dhall.auto )
-                  , dtName =
-                      fromMaybe
-                        ( error "Name missing" )
-                        ( InsOrdMap.lookup "name" fields' >>= Dhall.extract Dhall.auto )
-                  }
+  let
+    this =
+      DerivationTree
+        { dtInputs = inputs
+        , dtExec =
+            fromMaybe
+              ( error $ "exec missing " <> show fields' )
+              ( InsOrdMap.lookup "exec" fields' >>= Dhall.extract Dhall.auto )
+        , dtArgs =
+            fromMaybe
+              ( error "args missing" )
+              ( InsOrdMap.lookup "args" fields' >>= Dhall.extract Dhall.auto )
+        , dtName =
+            fromMaybe
+              ( error "Name missing" )
+              ( InsOrdMap.lookup "name" fields' >>= Dhall.extract Dhall.auto )
+        }
 
-        modify (this : )
+  modify (this : )
 
-        d <- derivationTreeToDerivation this
+  d <- derivationTreeToDerivation this
 
-        return
-          ( Nix.Derivation.outputs d
-              & Map.lookup "out"
-              & fromMaybe ( error "No output" )
-              & Nix.Derivation.path
-              & Path.encodeString
-              & LazyText.pack
-              & Dhall.embed Dhall.inject
-          )
-
-      e ->
-        Dhall.Core.normalize <$> subExpr go e
+  return
+    ( Nix.Derivation.outputs d
+        & Map.lookup "out"
+        & fromMaybe ( error "No output" )
+        & Nix.Derivation.path
+        & Path.encodeString
+        & fromString
+        & Expr.TextLit
+    )
 
 
 addDerivationTree

@@ -2,11 +2,15 @@
 
 module Main ( main ) where
 
+import Control.Monad.Trans.State.Strict ( evalStateT, runStateT )
+import Lens.Family
 import Control.Applicative ( (<**>) )
 import Control.Exception ( throwIO )
-import Dhall.Import ( load )
+import qualified Dhall.Import
 
-import qualified Data.Text.Lazy.IO as LazyText
+import qualified Data.Text.IO as Text
+import qualified Dhall.Context
+import qualified Dhall.Map
 import qualified Dhall.Core
 import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
@@ -32,7 +36,7 @@ main = do
     OptParse.execParser commandLineParser
 
   t <-
-    LazyText.readFile f
+    Text.readFile f
 
   parsedExpr <-
     case Dhall.Parser.exprFromText mempty t of
@@ -42,21 +46,34 @@ main = do
       Right a ->
         return a
 
-  expr <-
-    Dhall.Import.load parsedExpr
-
-  _ <-
-    case Dhall.TypeCheck.typeOf expr of
-      Left e ->
-        throwIO e
-
-      Right a ->
-        return a
-
   ( res, derivationTrees ) <-
-    DhallBuild.exprToDerivationTree ( Dhall.Core.normalize expr )
+    runStateT
+      ( evalStateT
+        ( Dhall.Import.loadWith parsedExpr )
+        ( Dhall.Import.emptyStatus "."
+            & Dhall.Import.normalizer .~ Dhall.Core.ReifiedNormalizer DhallBuild.dhallBuildNormalizer
+            & Dhall.Import.startingContext .~
+                ( Dhall.Context.empty
+                    & Dhall.Context.insert
+                        "derivation"
+                        ( Dhall.Core.Pi
+                            "_"
+                            ( Dhall.Core.Record
+                                ( Dhall.Map.fromList
+                                    [ ("exec", Dhall.Core.Text)
+                                    , ("args", Dhall.Core.App Dhall.Core.List Dhall.Core.Text)
+                                    , ("name", Dhall.Core.Text)
+                                    ]
+                                )
+                            )
+                            Dhall.Core.Text
+                        )
+                )
+        )
+      )
+      []
 
   Nix.Daemon.withDaemon $ \nixDaemon ->
     mapM_ ( DhallBuild.addDerivationTree nixDaemon ) derivationTrees
 
-  LazyText.putStrLn ( Dhall.Core.pretty ( Dhall.Core.normalize res ) )
+  Text.putStrLn ( Dhall.Core.pretty res )

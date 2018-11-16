@@ -44,7 +44,7 @@ withDaemon m =
 
       N.connect s ( N.SockAddrUnix socketPath )
 
-      writeInt s 1852405859
+      writeInt s 0x6e697863
 
       _WORKER_MAGIC_2 <-
         N.recv s 8
@@ -52,7 +52,11 @@ withDaemon m =
       _PROTOCOL_VERSION <-
         N.recv s 8
 
-      writeInt s 0 -- Padding?
+      writeInt s 0x115
+
+      writeInt s 0
+
+      writeInt s 0
 
       _ <-
         readNum s
