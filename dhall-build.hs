@@ -2,6 +2,8 @@
 
 module Main ( main ) where
 
+import Dhall.Core ( Expr(..) )
+import qualified Dhall.Map as Map
 import Control.Monad.Trans.State.Strict ( evalStateT, runStateT )
 import Lens.Family
 import Control.Applicative ( (<**>) )
@@ -52,28 +54,92 @@ main = do
         ( Dhall.Import.loadWith parsedExpr )
         ( Dhall.Import.emptyStatus "."
             & Dhall.Import.normalizer .~ Dhall.Core.ReifiedNormalizer DhallBuild.dhallBuildNormalizer
-            & Dhall.Import.startingContext .~
-                ( Dhall.Context.empty
-                    & Dhall.Context.insert
-                        "derivation"
-                        ( Dhall.Core.Pi
-                            "_"
-                            ( Dhall.Core.Record
-                                ( Dhall.Map.fromList
-                                    [ ("exec", Dhall.Core.Text)
-                                    , ("args", Dhall.Core.App Dhall.Core.List Dhall.Core.Text)
-                                    , ("name", Dhall.Core.Text)
-                                    ]
-                                )
-                            )
-                            Dhall.Core.Text
-                        )
-                )
+            & Dhall.Import.startingContext .~ context
         )
       )
       []
+
+  mapM_ print derivationTrees
 
   Nix.Daemon.withDaemon $ \nixDaemon ->
     mapM_ ( DhallBuild.addDerivationTree nixDaemon ) derivationTrees
 
   Text.putStrLn ( Dhall.Core.pretty res )
+
+
+-- context :: Dhall.Context.Context (Expr s X)
+context =
+  Dhall.Context.insert
+    "derivation"
+    ( Pi
+        "_"
+        ( Record
+            ( Map.fromList
+                [ ( "args", List `App` Text )
+                , ( "builder"
+                  , Union
+                      ( Map.fromList
+                          [ ( "Builtin"
+                            , Union
+                                ( Map.fromList
+                                    [ ( "Fetch-Url", Record mempty ) ]
+                                )
+                            )
+                          , ( "Exe", Text )
+                          ]
+                      )
+                  )
+                , ( "environment"
+                  , List
+                      `App`
+                        Record
+                          ( Map.fromList
+                              [ ( "name", Text )
+                              , ( "value"
+                                , Union
+                                    ( Map.fromList
+                                        [ ( "Bool", Bool ), ( "Text", Text ) ]
+                                    )
+                                )
+                              ]
+                          )
+                  )
+                , ( "name", Text )
+                , ( "output-hash"
+                  , Optional
+                      `App`
+                        Record
+                          ( Map.fromList
+                              [ ("algorithm"
+                                , Union
+                                    ( Map.fromList
+                                        [ ( "SHA256", Record mempty ) ]
+                                    )
+                                )
+                              , ( "hash", Text )
+                              , ( "mode"
+                                , Union
+                                    ( Map.fromList
+                                        [ ("Flat", Record mempty)
+                                        , ("Recursive", Record mempty)
+                                        ]
+                                    )
+                                )
+                              ]
+                          )
+                  )
+                , ( "outputs", List `App` Text )
+                , ( "system"
+                  , Union
+                      ( Map.fromList
+                          [ ( "builtin", Record mempty )
+                          , ( "x86_64-linux", Record mempty )
+                          ]
+                      )
+                  )
+                ]
+            )
+        )
+        Text
+    )
+    Dhall.Context.empty
